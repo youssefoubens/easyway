@@ -25,8 +25,9 @@ export function Applications() {
   const [filter, setFilter] = useState<'all' | 'draft' | 'sent' | 'failed' | 'scheduled'>('all');
   const [currentPage, setCurrentPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
-  const [sendingId, setSendingId] = useState<string | null>(null);
   const itemsPerPage = 10;
+  const [sendingEmail, setSendingEmail] = useState<string | null>(null);
+  const [emailError, setEmailError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchApplications();
@@ -62,91 +63,6 @@ export function Applications() {
     }
   }
 
-  async function handleSendEmail(app: Application) {
-    if (!user?.email) {
-      alert('Please make sure you are logged in with an email');
-      return;
-    }
-
-    if (!confirm(`Send this email to ${app.recipient_email}?`)) return;
-
-    setSendingId(app.id);
-
-    try {
-      const session = await supabase.auth.getSession();
-      const token = session.data.session?.access_token;
-
-      if (!token) {
-        throw new Error('Not authenticated');
-      }
-
-      // Get your Supabase project URL from environment or config
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-      
-      const response = await fetch(`${supabaseUrl}/functions/v1/send-email`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          from: user.email,
-          to: app.recipient_email,
-          subject: app.subject,
-          body: app.email_body,
-          applicationId: app.id
-        })
-      });
-
-      const responseText = await response.text();
-      let errorData;
-      
-      try {
-        errorData = JSON.parse(responseText);
-      } catch {
-        throw new Error(`Server error: ${responseText || 'No response from server'}`);
-      }
-
-      if (!response.ok) {
-        throw new Error(errorData.error || 'Failed to send email');
-      }
-
-      // Update application status to sent
-      const { error: updateError } = await supabase
-        .from('applications')
-        .update({
-          status: 'sent',
-          sent_at: new Date().toISOString(),
-          error_message: null
-        })
-        .eq('id', app.id);
-
-      if (updateError) throw updateError;
-
-      alert('Email sent successfully!');
-      await fetchApplications();
-      if (selectedApp?.id === app.id) {
-        setSelectedApp(null);
-      }
-    } catch (error: any) {
-      console.error('Error sending email:', error);
-      
-      // Update status to failed with error message
-      await supabase
-        .from('applications')
-        .update({
-          status: 'failed',
-          error_message: error.message || 'Failed to send email'
-        })
-        .eq('id', app.id);
-
-      alert(`Failed to send email: ${error.message}`);
-      await fetchApplications();
-    } finally {
-      setSendingId(null);
-    }
-  }
-
   async function handleDelete(id: string) {
     if (!confirm('Are you sure you want to delete this application?')) return;
 
@@ -160,6 +76,54 @@ export function Applications() {
       await fetchApplications();
     } catch (error) {
       console.error('Error deleting application:', error);
+    }
+  }
+
+  async function handleSendEmail(app: Application) {
+    if (!confirm(`Send email to ${app.recipient_email}?`)) return;
+
+    setSendingEmail(app.id);
+    setEmailError(null);
+
+    try {
+      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-gmail`;
+      const { data: { session } } = await supabase.auth.getSession();
+
+      if (!session) {
+        throw new Error('No active session');
+      }
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          applicationId: app.id,
+          recipientEmail: app.recipient_email,
+          subject: app.subject,
+          body: app.email_body,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        if (data.needsReauth) {
+          setEmailError('Please sign out and sign in again to grant Gmail permissions.');
+        } else {
+          throw new Error(data.error || 'Failed to send email');
+        }
+        return;
+      }
+
+      await fetchApplications();
+    } catch (error) {
+      console.error('Error sending email:', error);
+      setEmailError(error instanceof Error ? error.message : 'Failed to send email');
+    } finally {
+      setSendingEmail(null);
     }
   }
 
@@ -190,6 +154,22 @@ export function Applications() {
           </p>
         </div>
       </div>
+
+      {emailError && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-start gap-3">
+          <XCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm font-medium text-red-900">Failed to send email</p>
+            <p className="text-sm text-red-700 mt-1">{emailError}</p>
+          </div>
+          <button
+            onClick={() => setEmailError(null)}
+            className="text-red-400 hover:text-red-600"
+          >
+            <span className="text-xl leading-none">&times;</span>
+          </button>
+        </div>
+      )}
 
       <div className="flex gap-2 flex-wrap">
         {['all', 'sent', 'draft', 'scheduled', 'failed'].map((status) => (
@@ -252,7 +232,6 @@ export function Applications() {
                 {filteredApps.map((app) => {
                   const config = statusConfig[app.status];
                   const Icon = config.icon;
-                  const isSending = sendingId === app.id;
                   return (
                     <tr key={app.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-6 py-4">
@@ -281,15 +260,15 @@ export function Applications() {
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center justify-end gap-2">
-                          {(app.status === 'draft' || app.status === 'failed') && (
+                          {app.status === 'draft' && (
                             <button
                               onClick={() => handleSendEmail(app)}
-                              disabled={isSending}
-                              className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              disabled={sendingEmail === app.id}
+                              className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors disabled:opacity-50"
                               title="Send Email"
                             >
-                              {isSending ? (
-                                <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                              {sendingEmail === app.id ? (
+                                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-green-600" />
                               ) : (
                                 <Send className="w-4 h-4" />
                               )}
@@ -388,10 +367,7 @@ export function Applications() {
                     Status
                   </label>
                   <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium ${statusConfig[selectedApp.status].bg} ${statusConfig[selectedApp.status].color}`}>
-                    {(() => {
-                      const Icon = statusConfig[selectedApp.status].icon;
-                      return <Icon className="w-4 h-4" />;
-                    })()}
+                    {React.createElement(statusConfig[selectedApp.status].icon, { className: 'w-4 h-4' })}
                     {statusConfig[selectedApp.status].label}
                   </span>
                 </div>
@@ -414,28 +390,6 @@ export function Applications() {
                     Error Message
                   </label>
                   <p className="text-sm text-red-700">{selectedApp.error_message}</p>
-                </div>
-              )}
-
-              {(selectedApp.status === 'draft' || selectedApp.status === 'failed') && (
-                <div className="pt-4 border-t border-slate-200">
-                  <button
-                    onClick={() => handleSendEmail(selectedApp)}
-                    disabled={sendingId === selectedApp.id}
-                    className="w-full px-6 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                  >
-                    {sendingId === selectedApp.id ? (
-                      <>
-                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                        Sending...
-                      </>
-                    ) : (
-                      <>
-                        <Send className="w-5 h-5" />
-                        Send Email Now
-                      </>
-                    )}
-                  </button>
                 </div>
               )}
             </div>
