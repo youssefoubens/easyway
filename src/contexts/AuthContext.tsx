@@ -20,19 +20,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // Get the current session from storage
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       setUser(session?.user ?? null);
       setLoading(false);
     });
 
+    // Listen for auth state changes
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      (async () => {
-        setSession(session);
-        setUser(session?.user ?? null);
-      })();
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log('Auth state changed:', event);
+      
+      setSession(session);
+      setUser(session?.user ?? null);
+      
+      // Handle token refresh
+      if (event === 'TOKEN_REFRESHED') {
+        console.log('Token refreshed successfully');
+      }
+      
+      // Handle signed in
+      if (event === 'SIGNED_IN') {
+        console.log('User signed in');
+      }
+      
+      // Handle signed out
+      if (event === 'SIGNED_OUT') {
+        console.log('User signed out');
+      }
     });
 
     return () => subscription.unsubscribe();
@@ -63,7 +80,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         queryParams: {
           access_type: 'offline',
           prompt: 'consent',
-        }
+        },
+        // Skip if there's already a valid session
+        skipBrowserRedirect: false,
       }
     });
     return { error };

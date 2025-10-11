@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { supabase } from '../../lib/supabase';
-import { Send, Eye, Trash2, CheckCircle, Clock, XCircle, FileText, ChevronLeft, ChevronRight, AlertCircle } from 'lucide-react';
+import { Send, Eye, Trash2, CheckCircle, Clock, XCircle, FileText, ChevronLeft, ChevronRight, AlertCircle, Paperclip } from 'lucide-react';
 
 interface Application {
   id: string;
@@ -17,6 +17,12 @@ interface Application {
   contact_id: string | null;
 }
 
+interface Resume {
+  id: string;
+  file_url: string;
+  user_id: string;
+}
+
 export function Applications() {
   const { user, signOut } = useAuth();
   const [applications, setApplications] = useState<Application[]>([]);
@@ -28,10 +34,29 @@ export function Applications() {
   const itemsPerPage = 10;
   const [sendingEmail, setSendingEmail] = useState<string | null>(null);
   const [emailError, setEmailError] = useState<{ message: string; needsReauth: boolean } | null>(null);
+  const [resume, setResume] = useState<Resume | null>(null);
 
   useEffect(() => {
     fetchApplications();
+    fetchResume();
   }, [user, currentPage, filter]);
+
+  async function fetchResume() {
+    if (!user) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('resumes')
+        .select('id, file_url, user_id')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (error) throw error;
+      setResume(data);
+    } catch (error) {
+      console.error('Error fetching resume:', error);
+    }
+  }
 
   async function fetchApplications() {
     if (!user) return;
@@ -80,7 +105,12 @@ export function Applications() {
   }
 
   async function handleSendEmail(app: Application) {
-    if (!confirm(`Send email to ${app.recipient_email}?`)) return;
+    if (!resume) {
+      alert('Please upload your resume first in the Resume Manager before sending applications.');
+      return;
+    }
+
+    if (!confirm(`Send email to ${app.recipient_email} with your resume attached?`)) return;
 
     setSendingEmail(app.id);
     setEmailError(null);
@@ -93,14 +123,13 @@ export function Applications() {
         throw new Error('No active session. Please sign in again.');
       }
 
-      // WORKAROUND: Get tokens from localStorage if not in session
+      // Get provider tokens
       let providerToken = session.provider_token;
       let providerRefreshToken = session.provider_refresh_token;
 
       if (!providerToken || !providerRefreshToken) {
         console.warn('⚠️ Tokens not in session, checking localStorage...');
 
-        // Try localStorage auth token
         const authTokenKey = Object.keys(localStorage).find(key =>
           key.includes('-auth-token')
         );
@@ -120,14 +149,41 @@ export function Applications() {
         }
       }
 
-      console.log('📤 Sending email request...');
-      console.log('🔑 Provider token exists:', !!providerToken);
-      console.log('🔄 Provider refresh token exists:', !!providerRefreshToken);
-
       if (!providerToken && !providerRefreshToken) {
         console.error('❌ No provider tokens found anywhere!');
         throw new Error('Missing Gmail tokens. Please sign out and sign in again with Google.');
       }
+
+      // Download the resume file
+      console.log('📄 Downloading resume from:', resume.file_url);
+      const { data: resumeBlob, error: downloadError } = await supabase.storage
+        .from('resumes')
+        .download(resume.file_url);
+
+      if (downloadError) {
+        console.error('❌ Error downloading resume:', downloadError);
+        throw new Error('Failed to download resume file');
+      }
+
+      // Convert blob to base64
+      const reader = new FileReader();
+      const resumeBase64 = await new Promise<string>((resolve, reject) => {
+        reader.onloadend = () => {
+          const base64 = reader.result as string;
+          // Remove the data:application/pdf;base64, prefix
+          const base64Content = base64.split(',')[1];
+          resolve(base64Content);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(resumeBlob);
+      });
+
+      // Get the filename from the file_url
+      const filename = resume.file_url.split('/').pop() || 'resume.pdf';
+
+      console.log('📤 Sending email with resume attachment...');
+      console.log('📎 Attachment filename:', filename);
+      console.log('📎 Attachment size:', resumeBlob.size, 'bytes');
 
       const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-gmail`;
 
@@ -141,9 +197,14 @@ export function Applications() {
           recipientEmail: app.recipient_email,
           subject: app.subject,
           body: app.email_body,
-          // Pass the provider tokens (from session or localStorage)
           provider_token: providerToken,
           provider_refresh_token: providerRefreshToken,
+          // Add resume attachment
+          attachment: {
+            filename: filename,
+            content: resumeBase64,
+            mimeType: 'application/pdf',
+          },
         }),
       });
 
@@ -155,14 +216,12 @@ export function Applications() {
       if (!response.ok) {
         console.error('❌ Error from Edge Function:', data);
 
-        // Handle authentication errors
         if (data.needsReauth) {
           setEmailError({
             message: data.details || 'Please sign out and sign in again with Google to grant Gmail permissions.',
             needsReauth: true
           });
 
-          // Update application status to failed
           await supabase
             .from('applications')
             .update({
@@ -175,11 +234,10 @@ export function Applications() {
           return;
         }
 
-        // Handle other errors
         throw new Error(data.details || data.error || 'Failed to send email');
       }
 
-      console.log('✅ Email sent successfully:', data.messageId);
+      console.log('✅ Email sent successfully with resume attachment:', data.messageId);
 
       // Update application status to sent
       const { error: updateError } = await supabase
@@ -197,8 +255,7 @@ export function Applications() {
 
       await fetchApplications();
 
-      // Show success message
-      alert('Email sent successfully!');
+      alert('Email sent successfully with your resume attached!');
 
     } catch (error) {
       console.error('💥 Error sending email:', error);
@@ -210,7 +267,6 @@ export function Applications() {
         needsReauth: false
       });
 
-      // Update application status to failed
       await supabase
         .from('applications')
         .update({
@@ -228,7 +284,6 @@ export function Applications() {
   async function handleReauth() {
     if (confirm('You will be signed out and need to sign in again with Google. Continue?')) {
       await signOut();
-      // Redirect will happen automatically via AuthContext
     }
   }
 
@@ -259,6 +314,34 @@ export function Applications() {
           </p>
         </div>
       </div>
+
+      {!resume && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-medium text-amber-900">Resume Required</p>
+              <p className="text-sm text-amber-700 mt-1">
+                Please upload your resume in the Resume Manager before sending applications. Your resume will be automatically attached to all emails.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {resume && (
+        <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+          <div className="flex items-start gap-3">
+            <Paperclip className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-medium text-green-900">Resume Ready</p>
+              <p className="text-sm text-green-700 mt-1">
+                Your resume will be automatically attached to all emails you send.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {emailError && (
         <div className={`${emailError.needsReauth ? 'bg-amber-50 border-amber-200' : 'bg-red-50 border-red-200'} border rounded-xl p-4`}>
@@ -381,9 +464,9 @@ export function Applications() {
                           {app.status === 'draft' && (
                             <button
                               onClick={() => handleSendEmail(app)}
-                              disabled={sendingEmail === app.id}
-                              className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors disabled:opacity-50"
-                              title="Send Email"
+                              disabled={sendingEmail === app.id || !resume}
+                              className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              title={resume ? "Send Email with Resume" : "Upload resume first"}
                             >
                               {sendingEmail === app.id ? (
                                 <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-green-600" />
@@ -478,6 +561,17 @@ export function Applications() {
                   {selectedApp.email_body}
                 </div>
               </div>
+
+              {resume && (
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                  <div className="flex items-center gap-2">
+                    <Paperclip className="w-4 h-4 text-blue-600" />
+                    <span className="text-sm font-medium text-blue-900">
+                      Resume will be attached when sent
+                    </span>
+                  </div>
+                </div>
+              )}
 
               <div className="flex items-center gap-4 pt-4 border-t border-slate-200">
                 <div>
