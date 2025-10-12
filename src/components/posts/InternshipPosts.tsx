@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { supabase } from '../../lib/supabase';
-import { Plus, Briefcase, CreditCard as Edit2, Trash2, Calendar, Building2, Mail, ExternalLink, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Plus, Briefcase, CreditCard as Edit2, Trash2, Calendar, Building2, Mail, ExternalLink, ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 import { AddPostModal } from './AddPostModal';
 import { EditPostModal } from './EditPostModal';
+import { GeneratePostMessageModal } from '../ai/GeneratePostMessageModal';
+import { BatchGeneratePostsModal } from '../ai/BatchGeneratePostsModal';
 
 interface InternshipPost {
   id: string;
@@ -25,6 +27,9 @@ export function InternshipPosts() {
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingPost, setEditingPost] = useState<InternshipPost | null>(null);
+  const [generatingPost, setGeneratingPost] = useState<InternshipPost | null>(null);
+  const [selectedPosts, setSelectedPosts] = useState<Set<string>>(new Set());
+  const [showBatchModal, setShowBatchModal] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const itemsPerPage = 10;
@@ -73,6 +78,24 @@ export function InternshipPosts() {
     }
   }
 
+  function togglePostSelection(postId: string) {
+    const newSelected = new Set(selectedPosts);
+    if (newSelected.has(postId)) {
+      newSelected.delete(postId);
+    } else {
+      newSelected.add(postId);
+    }
+    setSelectedPosts(newSelected);
+  }
+
+  function toggleSelectAll() {
+    if (selectedPosts.size === posts.length && posts.length > 0) {
+      setSelectedPosts(new Set());
+    } else {
+      setSelectedPosts(new Set(posts.map(p => p.id)));
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -90,13 +113,24 @@ export function InternshipPosts() {
             Manage your saved internship opportunities
           </p>
         </div>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors shadow-sm"
-        >
-          <Plus className="w-5 h-5" />
-          Add Post
-        </button>
+        <div className="flex gap-3">
+          {selectedPosts.size > 0 && (
+            <button
+              onClick={() => setShowBatchModal(true)}
+              className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-xl font-medium hover:from-purple-700 hover:to-blue-700 transition-all shadow-sm"
+            >
+              <Sparkles className="w-5 h-5" />
+              Generate {selectedPosts.size} Messages
+            </button>
+          )}
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors shadow-sm"
+          >
+            <Plus className="w-5 h-5" />
+            Add Post
+          </button>
+        </div>
       </div>
 
       {posts.length === 0 ? (
@@ -117,95 +151,140 @@ export function InternshipPosts() {
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {posts.map((post) => (
-            <div
-              key={post.id}
-              className="bg-white rounded-xl p-6 shadow-sm border border-slate-200 hover:shadow-md transition-shadow"
-            >
-              <div className="flex items-start justify-between mb-4">
-                <div className="flex items-start gap-3 flex-1">
-                  <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center flex-shrink-0">
-                    <Building2 className="w-6 h-6 text-blue-600" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <h3 className="font-semibold text-slate-900 text-lg mb-1">
-                      {post.position_title}
-                    </h3>
-                    <p className="text-sm text-slate-600">{post.company_name}</p>
-                  </div>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setEditingPost(post)}
-                    className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-                  >
-                    <Edit2 className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => handleDelete(post.id)}
-                    className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
+        <>
+          {posts.length > 0 && (
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <input
+                  type="checkbox"
+                  checked={selectedPosts.size === posts.length && posts.length > 0}
+                  onChange={toggleSelectAll}
+                  className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-2 focus:ring-blue-500"
+                />
+                <span className="text-sm font-medium text-blue-900">
+                  {selectedPosts.size > 0 ? `${selectedPosts.size} selected` : 'Select posts for batch generation'}
+                </span>
               </div>
-
-              <p className="text-sm text-slate-700 line-clamp-3 mb-4">
-                {post.description}
-              </p>
-
-              <div className="space-y-2 mb-4">
-                {post.industry_sector && (
-                  <div className="flex items-center gap-2 text-sm text-slate-600">
-                    <span className="px-2 py-1 bg-slate-100 rounded text-xs font-medium">
-                      {post.industry_sector}
-                    </span>
-                  </div>
-                )}
-                {post.deadline && (
-                  <div className="flex items-center gap-2 text-sm text-slate-600">
-                    <Calendar className="w-4 h-4" />
-                    <span>Deadline: {new Date(post.deadline).toLocaleDateString()}</span>
-                  </div>
-                )}
-                {post.contact_email && (
-                  <div className="flex items-center gap-2 text-sm text-slate-600">
-                    <Mail className="w-4 h-4" />
-                    <span className="truncate">{post.contact_email}</span>
-                  </div>
-                )}
-                {post.post_url && (
-                  <a
-                    href={post.post_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-700"
-                  >
-                    <ExternalLink className="w-4 h-4" />
-                    <span>View Original Post</span>
-                  </a>
-                )}
-              </div>
-
-              {post.extracted_emails.length > 0 && (
-                <div className="pt-4 border-t border-slate-200">
-                  <p className="text-xs font-medium text-slate-600 mb-2">Extracted Emails:</p>
-                  <div className="flex flex-wrap gap-2">
-                    {post.extracted_emails.map((email, idx) => (
-                      <span
-                        key={idx}
-                        className="px-2 py-1 bg-green-50 text-green-700 rounded text-xs font-medium"
-                      >
-                        {email}
-                      </span>
-                    ))}
-                  </div>
-                </div>
+              {selectedPosts.size > 0 && (
+                <button
+                  onClick={() => setSelectedPosts(new Set())}
+                  className="text-sm text-blue-700 hover:text-blue-800 font-medium"
+                >
+                  Clear selection
+                </button>
               )}
             </div>
-          ))}
-        </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {posts.map((post) => (
+              <div
+                key={post.id}
+                className={`bg-white rounded-xl p-6 shadow-sm border transition-all ${
+                  selectedPosts.has(post.id)
+                    ? 'border-blue-500 ring-2 ring-blue-200'
+                    : 'border-slate-200 hover:shadow-md'
+                }`}
+              >
+                <div className="flex items-start gap-3 mb-4">
+                  <input
+                    type="checkbox"
+                    checked={selectedPosts.has(post.id)}
+                    onChange={() => togglePostSelection(post.id)}
+                    className="mt-1 w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-2 focus:ring-blue-500"
+                  />
+                  <div className="flex items-start justify-between flex-1">
+                    <div className="flex items-start gap-3 flex-1">
+                      <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center flex-shrink-0">
+                        <Building2 className="w-6 h-6 text-blue-600" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <h3 className="font-semibold text-slate-900 text-lg mb-1">
+                          {post.position_title}
+                        </h3>
+                        <p className="text-sm text-slate-600">{post.company_name}</p>
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setGeneratingPost(post)}
+                        className="p-2 text-purple-600 hover:bg-purple-50 rounded-lg transition-colors"
+                        title="Generate AI Message"
+                      >
+                        <Sparkles className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => setEditingPost(post)}
+                        className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                      >
+                        <Edit2 className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(post.id)}
+                        className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <p className="text-sm text-slate-700 line-clamp-3 mb-4 ml-7">
+                  {post.description}
+                </p>
+
+                <div className="space-y-2 mb-4 ml-7">
+                  {post.industry_sector && (
+                    <div className="flex items-center gap-2 text-sm text-slate-600">
+                      <span className="px-2 py-1 bg-slate-100 rounded text-xs font-medium">
+                        {post.industry_sector}
+                      </span>
+                    </div>
+                  )}
+                  {post.deadline && (
+                    <div className="flex items-center gap-2 text-sm text-slate-600">
+                      <Calendar className="w-4 h-4" />
+                      <span>Deadline: {new Date(post.deadline).toLocaleDateString()}</span>
+                    </div>
+                  )}
+                  {post.contact_email && (
+                    <div className="flex items-center gap-2 text-sm text-slate-600">
+                      <Mail className="w-4 h-4" />
+                      <span className="truncate">{post.contact_email}</span>
+                    </div>
+                  )}
+                  {post.post_url && (
+                    <a
+                      href={post.post_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-700"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                      <span>View Original Post</span>
+                    </a>
+                  )}
+                </div>
+
+                {post.extracted_emails.length > 0 && (
+                  <div className="pt-4 border-t border-slate-200 ml-7">
+                    <p className="text-xs font-medium text-slate-600 mb-2">Extracted Emails:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {post.extracted_emails.map((email, idx) => (
+                        <span
+                          key={idx}
+                          className="px-2 py-1 bg-green-50 text-green-700 rounded text-xs font-medium"
+                        >
+                          {email}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
       )}
 
       {posts.length > 0 && totalCount > itemsPerPage && (
@@ -251,6 +330,27 @@ export function InternshipPosts() {
           onSuccess={() => {
             setEditingPost(null);
             fetchPosts();
+          }}
+        />
+      )}
+
+      {generatingPost && (
+        <GeneratePostMessageModal
+          post={generatingPost}
+          onClose={() => setGeneratingPost(null)}
+          onSuccess={() => {
+            setGeneratingPost(null);
+          }}
+        />
+      )}
+
+      {showBatchModal && (
+        <BatchGeneratePostsModal
+          posts={posts.filter(p => selectedPosts.has(p.id))}
+          onClose={() => setShowBatchModal(false)}
+          onSuccess={() => {
+            setShowBatchModal(false);
+            setSelectedPosts(new Set());
           }}
         />
       )}

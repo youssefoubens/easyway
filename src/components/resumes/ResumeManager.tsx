@@ -1,13 +1,16 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { supabase } from '../../lib/supabase';
-import { Upload, FileText, Trash2, Download, CheckCircle, AlertCircle } from 'lucide-react';
+import { Upload, FileText, Trash2, Download, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 
 interface Resume {
   id: string;
   file_url: string;
   education: string[];
   skills: string[];
+  experience: any[];
+  projects: any[];
+  parsed_content: any;
   created_at: string;
 }
 
@@ -16,6 +19,7 @@ export function ResumeManager() {
   const [resume, setResume] = useState<Resume | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [parsing, setParsing] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
@@ -38,6 +42,30 @@ export function ResumeManager() {
       console.error('Error fetching resume:', error);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function parseResume(filePath: string) {
+    setParsing(true);
+    setMessage({ type: 'success', text: 'Parsing resume with AI...' });
+
+    try {
+      const { data, error } = await supabase.functions.invoke('parse-resume', {
+        body: { filePath }
+      });
+
+      if (error) throw error;
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      return data.data;
+    } catch (error) {
+      console.error('Error parsing resume:', error);
+      throw error;
+    } finally {
+      setParsing(false);
     }
   }
 
@@ -64,6 +92,7 @@ export function ResumeManager() {
     setMessage(null);
 
     try {
+      // Step 1: Upload file to storage
       const fileExt = file.name.split('.').pop();
       const fileName = `${Date.now()}.${fileExt}`;
       const filePath = `${user.id}/${fileName}`;
@@ -74,15 +103,29 @@ export function ResumeManager() {
 
       if (uploadError) throw uploadError;
 
-      const { data: { publicUrl } } = supabase.storage
-        .from('resumes')
-        .getPublicUrl(filePath);
+      setMessage({ type: 'success', text: 'File uploaded! Parsing with AI...' });
 
+      // Step 2: Parse resume with AI
+      const parsedData = await parseResume(filePath);
+
+      // Step 3: Save or update resume record with parsed data
       if (resume) {
+        // Delete old file if exists
+        if (resume.file_url !== filePath) {
+          await supabase.storage
+            .from('resumes')
+            .remove([resume.file_url]);
+        }
+
         const { error: updateError } = await supabase
           .from('resumes')
           .update({
             file_url: filePath,
+            parsed_content: parsedData.parsed_content || {},
+            education: parsedData.education || [],
+            skills: parsedData.skills || [],
+            experience: parsedData.experience || [],
+            projects: parsedData.projects || [],
             updated_at: new Date().toISOString(),
           })
           .eq('id', resume.id);
@@ -94,17 +137,17 @@ export function ResumeManager() {
           .insert({
             user_id: user.id,
             file_url: filePath,
-            parsed_content: {},
-            education: [],
-            skills: [],
-            experience: [],
-            projects: [],
+            parsed_content: parsedData.parsed_content || {},
+            education: parsedData.education || [],
+            skills: parsedData.skills || [],
+            experience: parsedData.experience || [],
+            projects: parsedData.projects || [],
           });
 
         if (insertError) throw insertError;
       }
 
-      setMessage({ type: 'success', text: 'Resume uploaded successfully!' });
+      setMessage({ type: 'success', text: 'Resume uploaded and parsed successfully!' });
       await fetchResume();
     } catch (error) {
       console.error('Error uploading resume:', error);
@@ -188,14 +231,16 @@ export function ResumeManager() {
               : 'bg-red-50 border border-red-200'
           }`}
         >
-          {message.type === 'success' ? (
+          {parsing ? (
+            <Loader2 className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5 animate-spin" />
+          ) : message.type === 'success' ? (
             <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
           ) : (
             <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
           )}
           <p
             className={`text-sm font-medium ${
-              message.type === 'success' ? 'text-green-900' : 'text-red-900'
+              parsing ? 'text-blue-900' : message.type === 'success' ? 'text-green-900' : 'text-red-900'
             }`}
           >
             {message.text}
@@ -220,14 +265,14 @@ export function ResumeManager() {
                 type="file"
                 accept=".pdf,.doc,.docx"
                 onChange={handleFileUpload}
-                disabled={uploading}
+                disabled={uploading || parsing}
                 className="hidden"
               />
               <span className="inline-flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
-                {uploading ? (
+                {uploading || parsing ? (
                   <>
-                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white" />
-                    Uploading...
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    {parsing ? 'Parsing...' : 'Uploading...'}
                   </>
                 ) : (
                   <>
@@ -284,6 +329,49 @@ export function ResumeManager() {
               </div>
             )}
 
+            {resume.experience.length > 0 && (
+              <div>
+                <h4 className="text-sm font-semibold text-slate-900 mb-3">Experience</h4>
+                <div className="space-y-3">
+                  {resume.experience.map((exp: any, index) => (
+                    <div key={index} className="bg-slate-50 p-4 rounded-lg">
+                      <div className="font-medium text-slate-900">{exp.title}</div>
+                      <div className="text-sm text-slate-600">{exp.company} • {exp.duration}</div>
+                      {exp.description && (
+                        <p className="text-sm text-slate-700 mt-2">{exp.description}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {resume.projects.length > 0 && (
+              <div>
+                <h4 className="text-sm font-semibold text-slate-900 mb-3">Projects</h4>
+                <div className="space-y-3">
+                  {resume.projects.map((project: any, index) => (
+                    <div key={index} className="bg-slate-50 p-4 rounded-lg">
+                      <div className="font-medium text-slate-900">{project.name}</div>
+                      <p className="text-sm text-slate-700 mt-1">{project.description}</p>
+                      {project.technologies && project.technologies.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mt-2">
+                          {project.technologies.map((tech: string, techIndex: number) => (
+                            <span
+                              key={techIndex}
+                              className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs"
+                            >
+                              {tech}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="flex gap-3">
               <button
                 onClick={handleDownload}
@@ -297,14 +385,14 @@ export function ResumeManager() {
                   type="file"
                   accept=".pdf,.doc,.docx"
                   onChange={handleFileUpload}
-                  disabled={uploading}
+                  disabled={uploading || parsing}
                   className="hidden"
                 />
                 <span className="flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
-                  {uploading ? (
+                  {uploading || parsing ? (
                     <>
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
-                      Uploading...
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      {parsing ? 'Parsing...' : 'Uploading...'}
                     </>
                   ) : (
                     <>
@@ -329,9 +417,9 @@ export function ResumeManager() {
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-6">
         <h3 className="text-sm font-semibold text-blue-900 mb-2">Note</h3>
         <p className="text-sm text-blue-800">
-          Your resume is securely stored and will be used to generate personalized application
-          emails. The AI will analyze your skills, experience, and education to match them with
-          internship opportunities.
+          Your resume is securely stored and automatically parsed using AI. The extracted information
+          (skills, experience, education, projects) will be used to generate personalized application
+          emails that match your qualifications with internship opportunities.
         </p>
       </div>
     </div>
