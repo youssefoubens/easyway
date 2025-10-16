@@ -1,55 +1,66 @@
 /*
-  # Create Storage Bucket for Resumes
+  # Update Storage Bucket for Multiple Resumes
 
   ## Overview
-  This migration creates a storage bucket for resume files and configures
-  the necessary security policies.
+  This migration updates the storage bucket configuration to support
+  multiple resume files per user with better organization.
 
-  ## 1. Storage Bucket
+  ## Changes Made:
   
-  ### `resumes` bucket
-  - Private bucket for storing user resume files (PDF, DOCX)
-  - Files organized by user_id folders
-  - Maximum file size: 5MB (enforced at application level)
+  1. Increase file size limit to 10MB (from 5MB) to support larger resumes
+  2. Add support for more document formats
+  3. File naming convention updated to support multiple resumes:
+     - Format: {user_id}/{resume_name}_{timestamp}.pdf
+     - Example: a1b2c3d4-e5f6-7890/Software_Engineer_Resume_1697123456.pdf
 
-  ## 2. Security Policies
+  ## Storage Structure:
   
-  ### Upload Policy
-  - Users can only upload files to their own folder (user_id subfolder)
-  - Authenticated users only
-  
-  ### Select Policy
-  - Users can only view files in their own folder
-  - Authenticated users only
-  
-  ### Update Policy
-  - Users can update files in their own folder
-  - Authenticated users only
-  
-  ### Delete Policy
-  - Users can delete files from their own folder
-  - Authenticated users only
+  ```
+  resumes/
+    ├── {user_id}/
+    │   ├── General_Resume_1697123456.pdf
+    │   ├── Tech_Resume_1697234567.pdf
+    │   └── Marketing_Resume_1697345678.docx
+  ```
 
-  ## 3. Important Notes
-  
-  - All resume files must be stored in a path like: {user_id}/filename.pdf
-  - The user_id is extracted from the file path and compared to auth.uid()
-  - This ensures users cannot access other users' resumes
+  ## Security:
+  - Users can only access files in their own folder
+  - All policies remain user-scoped for security
+  - Support for multiple file uploads per user
+
+  ## Supported File Types:
+  - PDF (.pdf)
+  - Word Documents (.docx, .doc)
+  - Rich Text Format (.rtf)
+  - Plain Text (.txt)
 */
 
--- Create the resumes storage bucket if it doesn't exist
-INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-VALUES (
-  'resumes',
-  'resumes',
-  false,
-  5242880, -- 5MB in bytes
-  ARRAY['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/msword']
-)
-ON CONFLICT (id) DO NOTHING;
+-- Update the resumes storage bucket configuration
+-- Note: We use UPDATE instead of INSERT since bucket already exists
+UPDATE storage.buckets 
+SET 
+  file_size_limit = 10485760, -- 10MB in bytes (increased from 5MB)
+  allowed_mime_types = ARRAY[
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document', -- .docx
+    'application/msword', -- .doc
+    'application/rtf', -- .rtf
+    'text/rtf', -- .rtf alternative MIME type
+    'text/plain' -- .txt
+  ]
+WHERE id = 'resumes';
+
+-- Drop existing storage policies to update them
+DROP POLICY IF EXISTS "Users can upload own resumes" ON storage.objects;
+DROP POLICY IF EXISTS "Users can view own resumes" ON storage.objects;
+DROP POLICY IF EXISTS "Users can update own resumes" ON storage.objects;
+DROP POLICY IF EXISTS "Users can delete own resumes" ON storage.objects;
+
+-- Recreate policies with better naming for multiple resumes support
 
 -- Policy for uploading resumes (INSERT)
-CREATE POLICY "Users can upload own resumes"
+-- Allows users to upload multiple files to their folder
+CREATE POLICY "Users can upload multiple resumes"
   ON storage.objects FOR INSERT
   TO authenticated
   WITH CHECK (
@@ -58,7 +69,8 @@ CREATE POLICY "Users can upload own resumes"
   );
 
 -- Policy for viewing resumes (SELECT)
-CREATE POLICY "Users can view own resumes"
+-- Users can view all their resume files
+CREATE POLICY "Users can view their resumes"
   ON storage.objects FOR SELECT
   TO authenticated
   USING (
@@ -67,7 +79,8 @@ CREATE POLICY "Users can view own resumes"
   );
 
 -- Policy for updating resumes (UPDATE)
-CREATE POLICY "Users can update own resumes"
+-- Users can update metadata of their resume files
+CREATE POLICY "Users can update their resumes"
   ON storage.objects FOR UPDATE
   TO authenticated
   USING (
@@ -80,10 +93,14 @@ CREATE POLICY "Users can update own resumes"
   );
 
 -- Policy for deleting resumes (DELETE)
-CREATE POLICY "Users can delete own resumes"
+-- Users can delete any of their resume files
+CREATE POLICY "Users can delete their resumes"
   ON storage.objects FOR DELETE
   TO authenticated
   USING (
     bucket_id = 'resumes' AND
     auth.uid()::text = (storage.foldername(name))[1]
   );
+
+-- Add helpful comment
+COMMENT ON TABLE storage.objects IS 'Storage for user resume files. Each user can have multiple resumes stored in their own folder.';

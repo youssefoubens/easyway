@@ -1,32 +1,39 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { supabase } from '../../lib/supabase';
-import { Upload, FileText, Trash2, Download, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
+import { Upload, FileText, Trash2, Download, CheckCircle, AlertCircle, Loader2, Star, Edit2, Plus } from 'lucide-react';
 
 interface Resume {
   id: string;
   file_url: string;
+  resume_name: string;
+  is_active: boolean;
   education: string[];
   skills: string[];
   experience: any[];
   projects: any[];
   parsed_content: any;
   created_at: string;
+  updated_at: string;
 }
 
 export function ResumeManager() {
   const { user } = useAuth();
-  const [resume, setResume] = useState<Resume | null>(null);
+  const [resumes, setResumes] = useState<Resume[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [parsing, setParsing] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [editingName, setEditingName] = useState<string | null>(null);
+  const [newResumeName, setNewResumeName] = useState('');
+  const [showUploadForm, setShowUploadForm] = useState(false);
+  const [uploadResumeName, setUploadResumeName] = useState('');
 
   useEffect(() => {
-    fetchResume();
+    fetchResumes();
   }, [user]);
 
-  async function fetchResume() {
+  async function fetchResumes() {
     if (!user) return;
 
     try {
@@ -34,12 +41,12 @@ export function ResumeManager() {
         .from('resumes')
         .select('*')
         .eq('user_id', user.id)
-        .maybeSingle();
+        .order('created_at', { ascending: false });
 
       if (error) throw error;
-      setResume(data);
+      setResumes(data || []);
     } catch (error) {
-      console.error('Error fetching resume:', error);
+      console.error('Error fetching resumes:', error);
     } finally {
       setLoading(false);
     }
@@ -73,8 +80,14 @@ export function ResumeManager() {
     const file = event.target.files?.[0];
     if (!file || !user) return;
 
-    if (file.size > 5 * 1024 * 1024) {
-      setMessage({ type: 'error', text: 'File size must be less than 5MB' });
+    // Validate resume name
+    if (!uploadResumeName.trim()) {
+      setMessage({ type: 'error', text: 'Please enter a name for this resume' });
+      return;
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      setMessage({ type: 'error', text: 'File size must be less than 10MB' });
       return;
     }
 
@@ -82,9 +95,12 @@ export function ResumeManager() {
       'application/pdf',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       'application/msword',
+      'application/rtf',
+      'text/rtf',
+      'text/plain',
     ];
     if (!allowedTypes.includes(file.type)) {
-      setMessage({ type: 'error', text: 'Only PDF and DOCX files are allowed' });
+      setMessage({ type: 'error', text: 'Only PDF, DOCX, DOC, RTF, and TXT files are allowed' });
       return;
     }
 
@@ -94,7 +110,9 @@ export function ResumeManager() {
     try {
       // Step 1: Upload file to storage
       const fileExt = file.name.split('.').pop();
-      const fileName = `${Date.now()}.${fileExt}`;
+      const timestamp = Date.now();
+      const sanitizedName = uploadResumeName.replace(/[^a-zA-Z0-9]/g, '_');
+      const fileName = `${sanitizedName}_${timestamp}.${fileExt}`;
       const filePath = `${user.id}/${fileName}`;
 
       const { error: uploadError } = await supabase.storage
@@ -108,94 +126,123 @@ export function ResumeManager() {
       // Step 2: Parse resume with AI
       const parsedData = await parseResume(filePath);
 
-      // Step 3: Save or update resume record with parsed data
-      if (resume) {
-        // Delete old file if exists
-        if (resume.file_url !== filePath) {
-          await supabase.storage
-            .from('resumes')
-            .remove([resume.file_url]);
-        }
+      // Step 3: Insert new resume record
+      // is_active will be set to true, and trigger will deactivate others
+      const { error: insertError } = await supabase
+        .from('resumes')
+        .insert({
+          user_id: user.id,
+          file_url: filePath,
+          resume_name: uploadResumeName.trim(),
+          is_active: true, // Make new resume active
+          parsed_content: parsedData.parsed_content || {},
+          education: parsedData.education || [],
+          skills: parsedData.skills || [],
+          experience: parsedData.experience || [],
+          projects: parsedData.projects || [],
+        });
 
-        const { error: updateError } = await supabase
-          .from('resumes')
-          .update({
-            file_url: filePath,
-            parsed_content: parsedData.parsed_content || {},
-            education: parsedData.education || [],
-            skills: parsedData.skills || [],
-            experience: parsedData.experience || [],
-            projects: parsedData.projects || [],
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', resume.id);
-
-        if (updateError) throw updateError;
-      } else {
-        const { error: insertError } = await supabase
-          .from('resumes')
-          .insert({
-            user_id: user.id,
-            file_url: filePath,
-            parsed_content: parsedData.parsed_content || {},
-            education: parsedData.education || [],
-            skills: parsedData.skills || [],
-            experience: parsedData.experience || [],
-            projects: parsedData.projects || [],
-          });
-
-        if (insertError) throw insertError;
-      }
+      if (insertError) throw insertError;
 
       setMessage({ type: 'success', text: 'Resume uploaded and parsed successfully!' });
-      await fetchResume();
+      setShowUploadForm(false);
+      setUploadResumeName('');
+      await fetchResumes();
     } catch (error) {
       console.error('Error uploading resume:', error);
       setMessage({ type: 'error', text: 'Failed to upload resume. Please try again.' });
     } finally {
       setUploading(false);
+      // Reset file input
+      event.target.value = '';
     }
   }
 
-  async function handleDelete() {
-    if (!resume || !user) return;
+  async function handleSetActive(resumeId: string) {
+    try {
+      const { error } = await supabase
+        .from('resumes')
+        .update({ is_active: true })
+        .eq('id', resumeId);
+
+      if (error) throw error;
+
+      setMessage({ type: 'success', text: 'Active resume updated!' });
+      await fetchResumes();
+    } catch (error) {
+      console.error('Error setting active resume:', error);
+      setMessage({ type: 'error', text: 'Failed to update active resume.' });
+    }
+  }
+
+  async function handleRename(resumeId: string, currentName: string) {
+    if (editingName === resumeId) {
+      // Save the new name
+      if (!newResumeName.trim()) {
+        setMessage({ type: 'error', text: 'Resume name cannot be empty' });
+        return;
+      }
+
+      try {
+        const { error } = await supabase
+          .from('resumes')
+          .update({ resume_name: newResumeName.trim() })
+          .eq('id', resumeId);
+
+        if (error) throw error;
+
+        setMessage({ type: 'success', text: 'Resume renamed successfully!' });
+        setEditingName(null);
+        setNewResumeName('');
+        await fetchResumes();
+      } catch (error) {
+        console.error('Error renaming resume:', error);
+        setMessage({ type: 'error', text: 'Failed to rename resume.' });
+      }
+    } else {
+      // Start editing
+      setEditingName(resumeId);
+      setNewResumeName(currentName);
+    }
+  }
+
+  async function handleDelete(resumeId: string, fileUrl: string) {
+    if (!confirm('Are you sure you want to delete this resume?')) return;
 
     try {
       const { error: storageError } = await supabase.storage
         .from('resumes')
-        .remove([resume.file_url]);
+        .remove([fileUrl]);
 
       if (storageError) throw storageError;
 
       const { error: dbError } = await supabase
         .from('resumes')
         .delete()
-        .eq('id', resume.id);
+        .eq('id', resumeId);
 
       if (dbError) throw dbError;
 
-      setResume(null);
       setMessage({ type: 'success', text: 'Resume deleted successfully!' });
+      await fetchResumes();
     } catch (error) {
       console.error('Error deleting resume:', error);
       setMessage({ type: 'error', text: 'Failed to delete resume. Please try again.' });
     }
   }
 
-  async function handleDownload() {
-    if (!resume) return;
-
+  async function handleDownload(fileUrl: string) {
     try {
       const { data, error } = await supabase.storage
         .from('resumes')
-        .download(resume.file_url);
+        .download(fileUrl);
 
       if (error) throw error;
 
       const url = URL.createObjectURL(data);
       const a = document.createElement('a');
       a.href = url;
-      a.download = resume.file_url.split('/').pop() || 'resume.pdf';
+      a.download = fileUrl.split('/').pop() || 'resume.pdf';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -205,6 +252,8 @@ export function ResumeManager() {
       setMessage({ type: 'error', text: 'Failed to download resume. Please try again.' });
     }
   }
+
+  const activeResume = resumes.find(r => r.is_active);
 
   if (loading) {
     return (
@@ -216,11 +265,20 @@ export function ResumeManager() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold text-slate-900">My Resume</h1>
-        <p className="text-slate-600 mt-1">
-          Upload your resume to enable AI-powered personalized applications
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-slate-900">My Resumes</h1>
+          <p className="text-slate-600 mt-1">
+            Manage multiple resumes and select which one to use for applications
+          </p>
+        </div>
+        <button
+          onClick={() => setShowUploadForm(true)}
+          className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors"
+        >
+          <Plus className="w-5 h-5" />
+          Add Resume
+        </button>
       </div>
 
       {message && (
@@ -248,179 +306,225 @@ export function ResumeManager() {
         </div>
       )}
 
-      <div className="bg-white rounded-xl p-8 shadow-sm border border-slate-200">
-        {!resume ? (
-          <div className="text-center space-y-6">
-            <div className="w-16 h-16 bg-blue-100 rounded-2xl flex items-center justify-center mx-auto">
-              <Upload className="w-8 h-8 text-blue-600" />
-            </div>
+      {/* Upload Form Modal */}
+      {showUploadForm && (
+        <div className="bg-white rounded-xl p-8 shadow-sm border border-slate-200">
+          <div className="space-y-4">
             <div>
-              <h3 className="text-lg font-semibold text-slate-900 mb-2">Upload Your Resume</h3>
+              <h3 className="text-lg font-semibold text-slate-900 mb-2">Upload New Resume</h3>
               <p className="text-sm text-slate-600">
-                Supported formats: PDF, DOCX (Max size: 5MB)
+                Supported formats: PDF, DOCX, DOC, RTF, TXT (Max size: 10MB)
               </p>
             </div>
-            <label className="inline-block">
+            
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                Resume Name *
+              </label>
               <input
-                type="file"
-                accept=".pdf,.doc,.docx"
-                onChange={handleFileUpload}
+                type="text"
+                value={uploadResumeName}
+                onChange={(e) => setUploadResumeName(e.target.value)}
+                placeholder="e.g., Software Engineer Resume, General Resume"
+                className="w-full px-4 py-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 disabled={uploading || parsing}
-                className="hidden"
               />
-              <span className="inline-flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
-                {uploading || parsing ? (
-                  <>
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                    {parsing ? 'Parsing...' : 'Uploading...'}
-                  </>
-                ) : (
-                  <>
-                    <Upload className="w-5 h-5" />
-                    Choose File
-                  </>
-                )}
-              </span>
-            </label>
-          </div>
-        ) : (
-          <div className="space-y-6">
-            <div className="flex items-start gap-4 p-6 bg-slate-50 rounded-xl">
-              <div className="w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center flex-shrink-0">
-                <FileText className="w-6 h-6 text-white" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <h3 className="text-lg font-semibold text-slate-900 mb-1">Resume Uploaded</h3>
-                <p className="text-sm text-slate-600 truncate">
-                  {resume.file_url.split('/').pop()}
-                </p>
-                <p className="text-xs text-slate-500 mt-1">
-                  Uploaded on {new Date(resume.created_at).toLocaleDateString()}
-                </p>
-              </div>
             </div>
 
-            {resume.skills.length > 0 && (
-              <div>
-                <h4 className="text-sm font-semibold text-slate-900 mb-3">Extracted Skills</h4>
-                <div className="flex flex-wrap gap-2">
-                  {resume.skills.map((skill, index) => (
-                    <span
-                      key={index}
-                      className="px-3 py-1 bg-blue-50 text-blue-700 rounded-lg text-sm font-medium"
-                    >
-                      {skill}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {resume.education.length > 0 && (
-              <div>
-                <h4 className="text-sm font-semibold text-slate-900 mb-3">Education</h4>
-                <div className="space-y-2">
-                  {resume.education.map((edu, index) => (
-                    <div key={index} className="text-sm text-slate-700 bg-slate-50 p-3 rounded-lg">
-                      {edu}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {resume.experience.length > 0 && (
-              <div>
-                <h4 className="text-sm font-semibold text-slate-900 mb-3">Experience</h4>
-                <div className="space-y-3">
-                  {resume.experience.map((exp: any, index) => (
-                    <div key={index} className="bg-slate-50 p-4 rounded-lg">
-                      <div className="font-medium text-slate-900">{exp.title}</div>
-                      <div className="text-sm text-slate-600">{exp.company} • {exp.duration}</div>
-                      {exp.description && (
-                        <p className="text-sm text-slate-700 mt-2">{exp.description}</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {resume.projects.length > 0 && (
-              <div>
-                <h4 className="text-sm font-semibold text-slate-900 mb-3">Projects</h4>
-                <div className="space-y-3">
-                  {resume.projects.map((project: any, index) => (
-                    <div key={index} className="bg-slate-50 p-4 rounded-lg">
-                      <div className="font-medium text-slate-900">{project.name}</div>
-                      <p className="text-sm text-slate-700 mt-1">{project.description}</p>
-                      {project.technologies && project.technologies.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5 mt-2">
-                          {project.technologies.map((tech: string, techIndex: number) => (
-                            <span
-                              key={techIndex}
-                              className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs"
-                            >
-                              {tech}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
             <div className="flex gap-3">
-              <button
-                onClick={handleDownload}
-                className="flex items-center gap-2 px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl font-medium hover:bg-slate-200 transition-colors"
-              >
-                <Download className="w-4 h-4" />
-                Download
-              </button>
               <label className="flex-1">
                 <input
                   type="file"
-                  accept=".pdf,.doc,.docx"
+                  accept=".pdf,.doc,.docx,.rtf,.txt"
                   onChange={handleFileUpload}
-                  disabled={uploading || parsing}
+                  disabled={uploading || parsing || !uploadResumeName.trim()}
                   className="hidden"
                 />
-                <span className="flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+                <span 
+                  className={`flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-medium transition-colors ${
+                    uploading || parsing || !uploadResumeName.trim()
+                      ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                      : 'bg-blue-600 text-white hover:bg-blue-700 cursor-pointer'
+                  }`}
+                >
                   {uploading || parsing ? (
                     <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <Loader2 className="w-5 h-5 animate-spin" />
                       {parsing ? 'Parsing...' : 'Uploading...'}
                     </>
                   ) : (
                     <>
-                      <Upload className="w-4 h-4" />
-                      Replace
+                      <Upload className="w-5 h-5" />
+                      Choose File
                     </>
                   )}
                 </span>
               </label>
               <button
-                onClick={handleDelete}
-                className="flex items-center gap-2 px-4 py-2.5 bg-red-50 text-red-700 rounded-xl font-medium hover:bg-red-100 transition-colors"
+                onClick={() => {
+                  setShowUploadForm(false);
+                  setUploadResumeName('');
+                  setMessage(null);
+                }}
+                disabled={uploading || parsing}
+                className="px-4 py-2.5 bg-slate-100 text-slate-700 rounded-xl font-medium hover:bg-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Trash2 className="w-4 h-4" />
-                Delete
+                Cancel
               </button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* Resumes List */}
+      {resumes.length === 0 ? (
+        <div className="bg-white rounded-xl p-12 shadow-sm border border-slate-200 text-center">
+          <div className="w-16 h-16 bg-blue-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+            <FileText className="w-8 h-8 text-blue-600" />
+          </div>
+          <h3 className="text-lg font-semibold text-slate-900 mb-2">No resumes yet</h3>
+          <p className="text-sm text-slate-600 mb-4">
+            Upload your first resume to start applying for internships
+          </p>
+          <button
+            onClick={() => setShowUploadForm(true)}
+            className="inline-flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition-colors"
+          >
+            <Upload className="w-5 h-5" />
+            Upload Resume
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {resumes.map((resume) => (
+            <div
+              key={resume.id}
+              className={`bg-white rounded-xl p-6 shadow-sm border-2 transition-all ${
+                resume.is_active
+                  ? 'border-blue-500 ring-2 ring-blue-100'
+                  : 'border-slate-200 hover:border-slate-300'
+              }`}
+            >
+              <div className="flex items-start gap-4">
+                <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${
+                  resume.is_active ? 'bg-blue-600' : 'bg-slate-200'
+                }`}>
+                  <FileText className={`w-6 h-6 ${resume.is_active ? 'text-white' : 'text-slate-600'}`} />
+                </div>
+                
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    {editingName === resume.id ? (
+                      <input
+                        type="text"
+                        value={newResumeName}
+                        onChange={(e) => setNewResumeName(e.target.value)}
+                        onBlur={() => handleRename(resume.id, resume.resume_name)}
+                        onKeyPress={(e) => e.key === 'Enter' && handleRename(resume.id, resume.resume_name)}
+                        className="text-lg font-semibold text-slate-900 border-b-2 border-blue-500 focus:outline-none"
+                        autoFocus
+                      />
+                    ) : (
+                      <h3 className="text-lg font-semibold text-slate-900">{resume.resume_name}</h3>
+                    )}
+                    
+                    {resume.is_active && (
+                      <span className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-lg text-xs font-medium">
+                        <Star className="w-3 h-3 fill-current" />
+                        Active
+                      </span>
+                    )}
+                  </div>
+                  
+                  <p className="text-sm text-slate-600 truncate mb-2">
+                    {resume.file_url.split('/').pop()}
+                  </p>
+                  
+                  <div className="flex flex-wrap gap-2 text-xs text-slate-500">
+                    <span>Uploaded {new Date(resume.created_at).toLocaleDateString()}</span>
+                    {resume.skills.length > 0 && (
+                      <>
+                        <span>•</span>
+                        <span>{resume.skills.length} skills</span>
+                      </>
+                    )}
+                    {resume.experience.length > 0 && (
+                      <>
+                        <span>•</span>
+                        <span>{resume.experience.length} experiences</span>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Skills Preview */}
+                  {resume.skills.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-3">
+                      {resume.skills.slice(0, 6).map((skill, index) => (
+                        <span
+                          key={index}
+                          className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-xs font-medium"
+                        >
+                          {skill}
+                        </span>
+                      ))}
+                      {resume.skills.length > 6 && (
+                        <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded text-xs">
+                          +{resume.skills.length - 6} more
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  {!resume.is_active && (
+                    <button
+                      onClick={() => handleSetActive(resume.id)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100 transition-colors"
+                    >
+                      <Star className="w-4 h-4" />
+                      Set Active
+                    </button>
+                  )}
+                  
+                  <button
+                    onClick={() => handleRename(resume.id, resume.resume_name)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-100 transition-colors"
+                  >
+                    <Edit2 className="w-4 h-4" />
+                    Rename
+                  </button>
+                  
+                  <button
+                    onClick={() => handleDownload(resume.file_url)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-100 transition-colors"
+                  >
+                    <Download className="w-4 h-4" />
+                    Download
+                  </button>
+                  
+                  <button
+                    onClick={() => handleDelete(resume.id, resume.file_url)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-red-50 text-red-700 rounded-lg text-sm font-medium hover:bg-red-100 transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-6">
-        <h3 className="text-sm font-semibold text-blue-900 mb-2">Note</h3>
-        <p className="text-sm text-blue-800">
-          Your resume is securely stored and automatically parsed using AI. The extracted information
-          (skills, experience, education, projects) will be used to generate personalized application
-          emails that match your qualifications with internship opportunities.
-        </p>
+        <h3 className="text-sm font-semibold text-blue-900 mb-2">💡 Tips</h3>
+        <ul className="text-sm text-blue-800 space-y-1">
+          <li>• Upload multiple versions (e.g., "Tech Resume", "Marketing Resume")</li>
+          <li>• The active resume (⭐) will be used for AI-generated applications</li>
+          <li>• Switch between resumes anytime with the "Set Active" button</li>
+          <li>• All resumes are parsed automatically to extract your skills and experience</li>
+        </ul>
       </div>
     </div>
   );
